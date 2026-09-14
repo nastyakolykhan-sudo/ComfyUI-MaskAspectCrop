@@ -29,18 +29,40 @@ model or template actually supports).
    `padding` (clamped so it never exceeds the frame).
 2. Takes the largest width and largest height across the whole batch — the "envelope"
    the crop has to cover everywhere, since the mask can move or change size over time.
-3. Picks the target aspect ratio:
+3. Picks the target aspect ratio for the *whole batch*:
    - a fixed one you choose (`16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `21:9`), or
    - `adaptive`: whichever of those six is numerically closest to the envelope's own
      ratio.
-4. Builds one crop window, shared by the whole batch, that already has the target
-   aspect ratio and fully contains the envelope (expanding the shorter side rather
-   than stretching), clamped to the source image bounds.
-5. Centers that same-size window on each frame's own mask bbox center (so the crop
+4. Builds the crop window(s), depending on `crop_mode`:
+   - `uniform`: **one** window, shared by every frame, sized to fully contain the
+     batch's envelope (from step 2) at the target ratio.
+   - `tight`: **each frame gets its own window**, sized to fully contain just *that
+     frame's* own mask (from step 1) at the target ratio.
+   Either way, the window already has the target ratio (expanding the shorter side
+   rather than stretching), clamped to the source image bounds.
+5. Centers each frame's window on that frame's own mask bbox center (so the crop
    still tracks a moving mask), crops, then resizes every frame to one
    `base_resolution`-driven output size (shorter side = `base_resolution`, rounded to
-   a multiple of 16). Because the crop window is already shaped to the target ratio,
+   a multiple of 16). Because each crop window is already shaped to the target ratio,
    this resize is a uniform scale in both dimensions — no distortion.
+
+### `tight` vs `uniform`
+
+Both give margin-free output *when the mask's own bbox already matches the target
+ratio* — the margin you otherwise see is the unavoidable cost of forcing a specific
+ratio without stretching. Where they differ is the batch:
+
+- `tight` — every frame is cropped as closely as possible to its own mask. Minimal
+  margin, always. But since every frame still gets resized to the same output
+  resolution, a frame with a smaller mask ends up more "zoomed in" than one with a
+  larger mask — the effective scale can vary frame to frame, which for video can read
+  as subtle zoom/breathing even though nothing in the scene changed size.
+- `uniform` — every frame uses the same crop window size (only the position tracks
+  the mask), so the zoom level is constant across the whole clip. The cost is margin
+  on any frame whose mask is smaller than the batch's largest.
+
+Default is `tight`. Switch to `uniform` if you see zoom jitter in the output video and
+stable framing matters more than tight cropping.
 
 ## Inputs
 
@@ -49,6 +71,7 @@ model or template actually supports).
 | `image` | IMAGE | — | Batch of frames |
 | `mask` | MASK | — | Matching batch of masks |
 | `aspect_ratio` | COMBO | `adaptive` | `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `21:9`, or `adaptive` |
+| `crop_mode` | COMBO | `tight` | `tight` (per-frame window, minimal margin) or `uniform` (one window for the whole batch, stable zoom) — see below |
 | `base_resolution` | INT | 512 | Shorter side of the output, in pixels |
 | `padding` | INT | 0 | Extra margin added around the mask bbox before fitting |
 

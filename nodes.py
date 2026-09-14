@@ -65,6 +65,22 @@ def _closest_aspect_ratio_name(ratio):
     )
 
 
+def _fit_to_ratio(w, h, target_ratio, max_w, max_h):
+    """Smallest box with target_ratio that fully contains a w x h box,
+    clamped to (max_w, max_h) without breaking the ratio."""
+    if w / h > target_ratio:
+        crop_w, crop_h = w, w / target_ratio
+    else:
+        crop_h, crop_w = h, h * target_ratio
+
+    if crop_w > max_w or crop_h > max_h:
+        scale = min(max_w / crop_w, max_h / crop_h)
+        crop_w *= scale
+        crop_h *= scale
+
+    return max(1, min(int(round(crop_w)), max_w)), max(1, min(int(round(crop_h)), max_h))
+
+
 class ImageCropByMaskToAspect:
     """
     Batch-aware version of KJNodes' "Image Crop By Mask And Resize" that fits
@@ -82,6 +98,7 @@ class ImageCropByMaskToAspect:
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
                 "aspect_ratio": (ASPECT_RATIO_CHOICES, {"default": "adaptive"}),
+                "crop_mode": (["tight", "uniform"], {"default": "tight"}),
                 "base_resolution": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 8}),
                 "padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
             },
@@ -94,10 +111,14 @@ class ImageCropByMaskToAspect:
     DESCRIPTION = (
         "Crops a batch of images by their masks (+ padding), fitting the crop to the "
         "closest of a fixed set of aspect ratios (or a chosen one), analysing the "
-        "whole batch so a moving mask still gets one consistent crop size and ratio."
+        "whole batch so a moving mask still gets one consistent aspect ratio. "
+        "crop_mode='tight' sizes each frame's crop window to its own mask (minimal "
+        "margin, zoom level can vary frame to frame); 'uniform' uses one crop "
+        "window size for the whole batch (stable zoom, but looser on frames whose "
+        "mask is smaller than the batch's largest)."
     )
 
-    def crop(self, image, mask, aspect_ratio, base_resolution, padding=0):
+    def crop(self, image, mask, aspect_ratio, crop_mode, base_resolution, padding=0):
         mask = mask.round()
         B, H, W, _ = image.shape
 
@@ -117,20 +138,13 @@ class ImageCropByMaskToAspect:
             target_name = aspect_ratio
         target_ratio = ASPECT_RATIOS[target_name]
 
-        # Step 3: uniform crop window that already matches target_ratio and
-        # fully contains the max_w x max_h envelope from step 1.
-        if max_w / max_h > target_ratio:
-            crop_w, crop_h = max_w, max_w / target_ratio
-        else:
-            crop_h, crop_w = max_h, max_h * target_ratio
-
-        if crop_w > W or crop_h > H:
-            scale = min(W / crop_w, H / crop_h)
-            crop_w *= scale
-            crop_h *= scale
-
-        crop_w = max(1, min(int(round(crop_w)), W))
-        crop_h = max(1, min(int(round(crop_h)), H))
+        # Step 3: crop window size(s) that already match target_ratio.
+        # uniform: one window, sized to contain the batch's largest mask, shared
+        # by every frame (stable zoom level across the clip).
+        # tight: each frame gets its own window, sized to its own mask only
+        # (minimal margin, but the effective zoom can vary frame to frame).
+        if crop_mode == "uniform":
+            uniform_crop_w, uniform_crop_h = _fit_to_ratio(max_w, max_h, target_ratio, W, H)
 
         # Step 4: final output size from base_resolution (shorter side),
         # snapped to a multiple of 16.
@@ -143,11 +157,15 @@ class ImageCropByMaskToAspect:
         target_width = _round_to_multiple(target_width)
         target_height = _round_to_multiple(target_height)
 
-        # Step 5: crop + resize each frame using the uniform window size,
-        # re-centered per frame on that frame's own mask.
+        # Step 5: crop + resize each frame, centered on that frame's own mask.
         image_list, mask_list, bbox_list = [], [], []
         for i in range(B):
-            x_c, y_c, _, _ = centers[i]
+            x_c, y_c, w_i, h_i = centers[i]
+
+            if crop_mode == "uniform":
+                crop_w, crop_h = uniform_crop_w, uniform_crop_h
+            else:
+                crop_w, crop_h = _fit_to_ratio(w_i, h_i, target_ratio, W, H)
 
             x0 = max(0, min(int(round(x_c - crop_w / 2)), W - crop_w))
             y0 = max(0, min(int(round(y_c - crop_h / 2)), H - crop_h))
