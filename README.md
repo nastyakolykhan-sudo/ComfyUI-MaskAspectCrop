@@ -119,7 +119,8 @@ same for a single image (a batch of one).
    - use the **rotation** slider to turn the image behind the frame (positive =
      clockwise). The frame stays locked to the same content while you rotate.
    - **aspect_ratio** locks the frame's proportions while dragging (and reshapes the
-     current frame when you change it). **Reset crop** returns to the full image.
+     current frame when you change it). **Reset** puts everything back to defaults: full image, 0° rotation, `free`
+     aspect.
 3. Run again to apply.
 
 The frame can extend past the image edges once rotated. Those areas are filled black in

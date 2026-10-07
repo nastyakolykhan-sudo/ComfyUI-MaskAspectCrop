@@ -142,6 +142,17 @@ class CropRotateEditor {
         this.node.setDirtyCanvas(true, true);
     }
 
+    resetAll() {
+        this.setWidget("center_x", 0);
+        this.setWidget("center_y", 0);
+        this.setWidget("crop_width", 0);
+        this.setWidget("crop_height", 0);
+        this.setWidget("rotation", 0);
+        this.setWidget("aspect_ratio", "free");
+        this.notice = "";
+        this.node.setDirtyCanvas(true, true);
+    }
+
     applyAspect() {
         const ratio = ASPECT_RATIOS[widget(this.node, "aspect_ratio")?.value];
         if (!ratio || !this.ready()) return;
@@ -437,8 +448,8 @@ app.registerExtension({
                 };
             }
 
-            const reset = this.addWidget("button", "Reset crop", null, () => {
-                editor.resetFrame();
+            const reset = this.addWidget("button", "Reset", null, () => {
+                editor.resetAll();
                 editor.draw();
             }, { serialize: false });
             reset.serialize = false;
