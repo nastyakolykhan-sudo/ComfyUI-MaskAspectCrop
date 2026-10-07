@@ -1,9 +1,15 @@
 # ComfyUI-MaskAspectCrop
 
-One node: **Image Crop By Mask To Aspect Ratio**. It's a batch-aware take on KJNodes'
-`Image Crop By Mask And Resize`, built for video (a batch of images + a batch of masks
-where the mask moves/changes over time) and for a fixed set of allowed output aspect
-ratios instead of an arbitrary one.
+Crop-and-paste-back tools for images and video batches:
+
+- **Image Crop By Mask To Aspect Ratio**: a batch-aware take on KJNodes'
+  `Image Crop By Mask And Resize`, built for video (a batch of images + a batch of
+  masks where the mask moves/changes over time) and for a fixed set of allowed output
+  aspect ratios instead of an arbitrary one. Paste back with KJNodes'
+  `Image Uncrop By Mask`.
+- **Crop & Rotate** + **Crop & Rotate Composite**: interactively crop a *rotated*
+  region, process it, and paste it back exactly where it came from. See
+  [Crop & Rotate](#crop--rotate) below.
 
 ## Install
 
@@ -13,6 +19,8 @@ git clone <this repo>
 ```
 
 No extra Python dependencies. Restart ComfyUI.
+
+# Image Crop By Mask To Aspect Ratio
 
 ## Why not just use KJNodes' node directly
 
@@ -93,3 +101,66 @@ stable framing matters more than tight cropping.
   clamps — the aspect-ratio fitting in step 4 replaces that role.
 - "Closest" ratio (for `adaptive`) is measured on a log scale, so e.g. `2:1` and `1:2`
   are equally "far" from `1:1` — orientation doesn't bias the pick.
+
+# Crop & Rotate
+
+Crop a **rotated** region out of an image (or a whole video batch), process it, and
+paste it back exactly where it came from. The image turns behind an upright frame
+(Lightroom-style), so what you see in the frame is exactly what comes out. Works the
+same for a single image (a batch of one).
+
+## Crop & Rotate node
+
+1. Connect an image (or video frame batch) and run the workflow once — this loads the
+   first frame into the node's preview.
+2. In the preview:
+   - drag inside the frame to move it, drag the edges/corners to resize,
+     drag outside the frame to draw a new one;
+   - use the **rotation** slider to turn the image behind the frame (positive =
+     clockwise). The frame stays locked to the same content while you rotate.
+   - **aspect_ratio** locks the frame's proportions while dragging (and reshapes the
+     current frame when you change it). **Reset crop** returns to the full image.
+3. Run again to apply.
+
+The frame can extend past the image edges once rotated. Those areas are filled black in
+the output image and are `0` in the output mask.
+
+| Input | Type | Notes |
+|---|---|---|
+| `image` | IMAGE | Single image or batch — the whole batch uses the same frame |
+| `mask` | MASK | Optional — cropped with the exact same geometry |
+| `center_x`, `center_y` | FLOAT | Frame centre, in source pixels (set by dragging) |
+| `crop_width`, `crop_height` | INT | Frame size in source pixels; `0` = full image |
+| `rotation` | FLOAT | Degrees, −180…180, positive = clockwise |
+| `aspect_ratio` | COMBO | `free`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `21:9` — editor drag constraint only |
+
+| Output | Type | Notes |
+|---|---|---|
+| `image` | IMAGE | The straightened crop, at native resolution (`crop_width × crop_height`) |
+| `mask` | MASK | The input mask cropped the same way; without a mask input, `1` where the crop covers the source and `0` in the filled corners |
+| `crop_rotate` | CROP_ROTATE | Frame + rotation data for the composite node |
+
+With rotation at `0` and the frame inside the image, the crop is an exact pixel slice
+(no resampling).
+
+## Crop & Rotate Composite node
+
+| Input | Type | Notes |
+|---|---|---|
+| `destination` | IMAGE | The original image/batch that was cropped (must be the same size) |
+| `source` | IMAGE | The processed crop — any resolution; it's mapped onto the original frame |
+| `crop_rotate` | CROP_ROTATE | From the Crop & Rotate node |
+| `feather` | INT | Soft edge inside the frame border, in destination pixels |
+| `mask` | MASK | Optional — paste only this region (in crop space, any resolution) |
+
+Only the rotated frame area of the destination is touched; everything outside it is
+left bit-identical. Single images and batches broadcast against each other (e.g. one
+processed still pasted onto every frame of a video).
+
+## Crop & Rotate notes
+
+- The preview shows the first frame of the batch. If the input resolution changes, the
+  crop resets to the full image and asks you to run again.
+- One frame for the whole batch — there's no per-frame keyframing of the crop.
+- The composite needs the destination at the same size the crop was taken from; it
+  errors clearly otherwise rather than guessing a rescale.
