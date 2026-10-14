@@ -24,7 +24,7 @@ RESOLVED_ASPECT_RATIO_NAMES = list(ASPECT_RATIOS.keys())
 ASPECT_RATIO_CHOICES = RESOLVED_ASPECT_RATIO_NAMES + ["adaptive"]
 
 
-def _round_to_multiple(value, multiple=16):
+def _round_to_multiple(value, multiple):
     return max(multiple, int(round(value / multiple)) * multiple)
 
 
@@ -101,6 +101,8 @@ class ImageCropByMaskToAspect:
                 "crop_mode": (["tight", "uniform"], {"default": "tight"}),
                 "base_resolution": ("INT", {"default": 512, "min": 64, "max": MAX_RESOLUTION, "step": 8}),
                 "padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "divisible_by": ("INT", {"default": 1, "min": 1, "max": 256, "step": 1,
+                                         "tooltip": "Snap both output sides to a multiple of this (1 = exact base_resolution; 16 for most video models)."}),
             },
         }
 
@@ -118,7 +120,7 @@ class ImageCropByMaskToAspect:
         "mask is smaller than the batch's largest)."
     )
 
-    def crop(self, image, mask, aspect_ratio, crop_mode, base_resolution, padding=0):
+    def crop(self, image, mask, aspect_ratio, crop_mode, base_resolution, padding=0, divisible_by=1):
         mask = mask.round()
         B, H, W, _ = image.shape
 
@@ -146,16 +148,16 @@ class ImageCropByMaskToAspect:
         if crop_mode == "uniform":
             uniform_crop_w, uniform_crop_h = _fit_to_ratio(max_w, max_h, target_ratio, W, H)
 
-        # Step 4: final output size from base_resolution (shorter side),
-        # snapped to a multiple of 16.
+        # Step 4: final output size. The shorter side is base_resolution; the
+        # longer side follows the ratio (exact for e.g. 1080 at 16:9 ->
+        # 1920x1080). Both are then snapped to the nearest multiple of
+        # divisible_by (1 = no snapping).
+        short_side = _round_to_multiple(base_resolution, divisible_by)
+        long_side = _round_to_multiple(base_resolution * max(target_ratio, 1 / target_ratio), divisible_by)
         if target_ratio >= 1:
-            target_height = base_resolution
-            target_width = base_resolution * target_ratio
+            target_width, target_height = long_side, short_side
         else:
-            target_width = base_resolution
-            target_height = base_resolution / target_ratio
-        target_width = _round_to_multiple(target_width)
-        target_height = _round_to_multiple(target_height)
+            target_width, target_height = short_side, long_side
 
         # Step 5: crop + resize each frame, centered on that frame's own mask.
         image_list, mask_list, bbox_list = [], [], []

@@ -50,9 +50,10 @@ model or template actually supports).
    rather than stretching), clamped to the source image bounds.
 5. Centers each frame's window on that frame's own mask bbox center (so the crop
    still tracks a moving mask), crops, then resizes every frame to one
-   `base_resolution`-driven output size (shorter side = `base_resolution`, rounded to
-   a multiple of 16). Because each crop window is already shaped to the target ratio,
-   this resize is a uniform scale in both dimensions — no distortion.
+   `base_resolution`-driven output size (shorter side = `base_resolution`, longer
+   side = that times the ratio, both rounded to the nearest multiple of
+   `divisible_by`, which defaults to `1` = exact). Because each
+   crop window is already shaped to the target ratio, this resize is a uniform scale in both dimensions — no distortion.
 
 ### `tight` vs `uniform`
 
@@ -82,6 +83,7 @@ stable framing matters more than tight cropping.
 | `crop_mode` | COMBO | `tight` | `tight` (per-frame window, minimal margin) or `uniform` (one window for the whole batch, stable zoom) — see below |
 | `base_resolution` | INT | 512 | Shorter side of the output, in pixels |
 | `padding` | INT | 0 | Extra margin added around the mask bbox before fitting |
+| `divisible_by` | INT | 1 | Snaps both output sides to the nearest multiple of this. `1` = exact `base_resolution` (1080 at 16:9 → 1920×1080); `16` for models that need it (1080 → 1088×1920 at 9:16) |
 
 ## Outputs
 
