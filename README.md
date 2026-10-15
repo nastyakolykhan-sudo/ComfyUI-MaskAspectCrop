@@ -37,23 +37,27 @@ model or template actually supports).
    `padding` (clamped so it never exceeds the frame).
 2. Takes the largest width and largest height across the whole batch — the "envelope"
    the crop has to cover everywhere, since the mask can move or change size over time.
+   Frames with an empty mask are left out.
 3. Picks the target aspect ratio for the *whole batch*:
    - a fixed one you choose (`16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `21:9`), or
    - `adaptive`: whichever of those six is numerically closest to the envelope's own
-     ratio.
-4. Builds the crop window(s), depending on `crop_mode`:
+     ratio (or to the image's own ratio when no frame has a mask).
+4. Handles frames with an empty mask (see [Frames without a mask](#frames-without-a-mask)).
+5. Builds the crop window(s), depending on `crop_mode`:
    - `uniform`: **one** window, shared by every frame, sized to fully contain the
      batch's envelope (from step 2) at the target ratio.
    - `tight`: **each frame gets its own window**, sized to fully contain just *that
      frame's* own mask (from step 1) at the target ratio.
    Either way, the window already has the target ratio (expanding the shorter side
    rather than stretching), clamped to the source image bounds.
-5. Centers each frame's window on that frame's own mask bbox center (so the crop
-   still tracks a moving mask), crops, then resizes every frame to one
-   `base_resolution`-driven output size (shorter side = `base_resolution`, longer
-   side = that times the ratio, both rounded to the nearest multiple of
-   `divisible_by`, which defaults to `1` = exact). Because each
-   crop window is already shaped to the target ratio, this resize is a uniform scale in both dimensions — no distortion.
+6. Centers each frame's window on that frame's own mask bbox center (so the crop
+   still tracks a moving mask), then optionally smooths the windows over time (see
+   [Smoothing](#smoothing)).
+7. Crops, then resizes every frame to one `base_resolution`-driven output size
+   (shorter side = `base_resolution`, longer side = that times the ratio, both rounded
+   to the nearest multiple of `divisible_by`, which defaults to `1` = exact). Because
+   each crop window is already shaped to the target ratio, this resize is a uniform
+   scale in both dimensions — no distortion.
 
 ### `tight` vs `uniform`
 
@@ -71,7 +75,41 @@ ratio without stretching. Where they differ is the batch:
   on any frame whose mask is smaller than the batch's largest.
 
 Default is `tight`. Switch to `uniform` if you see zoom jitter in the output video and
-stable framing matters more than tight cropping.
+stable framing matters more than tight cropping, or keep `tight` and turn on
+`smoothing`.
+
+### Frames without a mask
+
+`empty_mask` decides what a frame with an empty mask shows:
+
+- `hold_last` (default): reuses the crop of the last frame that had a mask, so the
+  framing simply freezes while the mask is gone. Empty frames at the very start of the
+  clip take the first frame that has a mask.
+- `full_image`: uses the whole image. With a ratio that matches the image (e.g.
+  `16:9` on a 1920×1080 source) that's exactly the full frame, uncropped; with a
+  different forced ratio it's the largest centred window of that ratio, since a true
+  full frame isn't possible without stretching.
+
+A batch (or single image) with no mask at all always uses the whole image, and
+`adaptive` then picks the ratio closest to the image itself.
+
+### Smoothing
+
+`smoothing` (in frames, `0` = off) evens out jumps in the crop's position and zoom
+across the clip, like a stabilised camera following the mask:
+
+- The motion is averaged over roughly that many frames on either side, with no lag
+  (the whole clip is analysed at once), and steady movement isn't slowed down at the
+  start or end of the clip.
+- The mask is never cut off: each frame's window is never smaller than that frame's
+  own window, and its position is kept within the range where that frame's padded
+  mask still fits inside. A window that's about to grow starts growing a little early
+  instead.
+- With `full_image`, the zoom out to the full frame and back eases in and out instead
+  of snapping.
+
+Start around `3`–`8` for typical mask jitter; higher values give a steadier, slower
+camera, at the cost of a little more margin around the mask.
 
 ## Inputs
 
@@ -84,6 +122,8 @@ stable framing matters more than tight cropping.
 | `base_resolution` | INT | 512 | Shorter side of the output, in pixels |
 | `padding` | INT | 0 | Extra margin added around the mask bbox before fitting |
 | `divisible_by` | INT | 1 | Snaps both output sides to the nearest multiple of this. `1` = exact `base_resolution` (1080 at 16:9 → 1920×1080); `16` for models that need it (1080 → 1088×1920 at 9:16) |
+| `empty_mask` | COMBO | `hold_last` | What frames with an empty mask show: `hold_last` or `full_image` — see [Frames without a mask](#frames-without-a-mask) |
+| `smoothing` | INT | 0 | Smooths the crop's movement and zoom over time, in frames (`0` = off) — see [Smoothing](#smoothing) |
 
 ## Outputs
 

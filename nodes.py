@@ -30,30 +30,26 @@ def _round_to_multiple(value, multiple):
 
 def _mask_center_and_padded_size(mask_frame, padding):
     """Bounding box of a single mask frame, expanded by `padding` and clamped
-    to the frame's own bounds. Returns (x_center, y_center, width, height)."""
+    to the frame's own bounds. Returns (x_center, y_center, width, height),
+    or None when the mask is empty."""
     h0, w0 = mask_frame.shape
     iy, ix = (mask_frame == 1).nonzero(as_tuple=True)
 
     if iy.numel() == 0:
-        x_c, y_c = w0 / 2.0, h0 / 2.0
-        width = height = 0
-    else:
-        x_min, x_max = ix.min().item(), ix.max().item()
-        y_min, y_max = iy.min().item(), iy.max().item()
-        width = x_max - x_min + 1
-        height = y_max - y_min + 1
-        x_c = (x_min + x_max) / 2.0
-        y_c = (y_min + y_max) / 2.0
+        return None
+
+    x_min, x_max = ix.min().item(), ix.max().item()
+    y_min, y_max = iy.min().item(), iy.max().item()
+    width = x_max - x_min + 1
+    height = y_max - y_min + 1
+    x_c = (x_min + x_max) / 2.0
+    y_c = (y_min + y_max) / 2.0
 
     pad_x = min((w0 - width) // 2, padding)
     pad_y = min((h0 - height) // 2, padding)
 
     final_width = min(width + 2 * pad_x, w0)
     final_height = min(height + 2 * pad_y, h0)
-
-    # Guard against a fully empty mask producing a zero-area crop.
-    final_width = max(final_width, 1)
-    final_height = max(final_height, 1)
 
     return x_c, y_c, final_width, final_height
 
@@ -81,6 +77,45 @@ def _fit_to_ratio(w, h, target_ratio, max_w, max_h):
     return max(1, min(int(round(crop_w)), max_w)), max(1, min(int(round(crop_h)), max_h))
 
 
+def _smooth(values, radius, hold_peaks=False, keep_trend=False):
+    """Zero-lag Gaussian smoothing over time (one value per frame).
+
+    Past the ends, the first/last frame is repeated, or with keep_trend the
+    motion is mirrored around it, so steady movement doesn't slow down at the
+    start/end of the clip. With hold_peaks, a sliding max over the same radius
+    runs first, so the result never dips below any input value: a crop window
+    that is about to grow starts growing early instead of cutting the mask off."""
+    n = len(values)
+    offsets = range(-radius, radius + 1)
+
+    def at(seq, i):
+        if 0 <= i < n:
+            return seq[i]
+        edge = 0 if i < 0 else n - 1
+        if not keep_trend:
+            return seq[edge]
+        mirrored = min(max(2 * edge - i, 0), n - 1)
+        return 2 * seq[edge] - seq[mirrored]
+
+    if hold_peaks:
+        values = [max(at(values, i + k) for k in offsets) for i in range(n)]
+    sigma = radius / 2.0
+    weights = [math.exp(-0.5 * (k / sigma) ** 2) for k in offsets]
+    total = sum(weights)
+    return [sum(w * at(values, i + k) for w, k in zip(weights, offsets)) / total for i in range(n)]
+
+
+def _smooth_in_corridor(values, lows, highs, radius, passes=8):
+    """Smooth a per-frame position while keeping each frame inside its own
+    [low, high] range: smooth, clamp, and repeat, so the clamps don't leave
+    kinks and the path settles into a smooth line through the corridor."""
+    path = values
+    for _ in range(passes):
+        path = _smooth(path, radius, keep_trend=True)
+        path = [min(max(v, lo), hi) for v, lo, hi in zip(path, lows, highs)]
+    return path
+
+
 class ImageCropByMaskToAspect:
     """
     Batch-aware version of KJNodes' "Image Crop By Mask And Resize" that fits
@@ -103,6 +138,10 @@ class ImageCropByMaskToAspect:
                 "padding": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
                 "divisible_by": ("INT", {"default": 1, "min": 1, "max": 256, "step": 1,
                                          "tooltip": "Snap both output sides to a multiple of this (1 = exact base_resolution; 16 for most video models)."}),
+                "empty_mask": (["hold_last", "full_image"], {"default": "hold_last",
+                                         "tooltip": "Frames with an empty mask: hold_last reuses the crop of the last frame that had a mask; full_image uses the whole image. A batch with no mask at all always uses the whole image."}),
+                "smoothing": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1,
+                                      "tooltip": "Smooths the crop's movement and zoom over time, in frames (0 = off). The mask always stays inside the crop."}),
             },
         }
 
@@ -117,38 +156,100 @@ class ImageCropByMaskToAspect:
         "crop_mode='tight' sizes each frame's crop window to its own mask (minimal "
         "margin, zoom level can vary frame to frame); 'uniform' uses one crop "
         "window size for the whole batch (stable zoom, but looser on frames whose "
-        "mask is smaller than the batch's largest)."
+        "mask is smaller than the batch's largest). empty_mask decides what frames "
+        "without a mask show; smoothing evens out jumps in the crop over time."
     )
 
-    def crop(self, image, mask, aspect_ratio, crop_mode, base_resolution, padding=0, divisible_by=1):
+    def crop(self, image, mask, aspect_ratio, crop_mode, base_resolution, padding=0, divisible_by=1,
+             empty_mask="hold_last", smoothing=0):
         mask = mask.round()
         B, H, W, _ = image.shape
 
-        # Step 1: per-frame mask bbox center + padded size.
-        centers = []
-        for i in range(B):
-            centers.append(_mask_center_and_padded_size(mask[i], padding))
+        # Step 1: per-frame mask bbox center + padded size (None = empty mask).
+        boxes = [_mask_center_and_padded_size(mask[i], padding) for i in range(B)]
+        found = [b for b in boxes if b is not None]
 
-        max_w = max(c[2] for c in centers)
-        max_h = max(c[3] for c in centers)
-        envelope_ratio = max_w / max_h
-
-        # Step 2: resolve the target aspect ratio for the whole batch.
+        # Step 2: resolve the target aspect ratio for the whole batch, from the
+        # frames that have a mask. With no mask anywhere, adaptive picks the
+        # ratio closest to the image itself (so the output is the full frame).
+        if found:
+            max_w = max(b[2] for b in found)
+            max_h = max(b[3] for b in found)
+            envelope_ratio = max_w / max_h
+        else:
+            envelope_ratio = W / H
         if aspect_ratio == "adaptive":
             target_name = _closest_aspect_ratio_name(envelope_ratio)
         else:
             target_name = aspect_ratio
         target_ratio = ASPECT_RATIOS[target_name]
 
-        # Step 3: crop window size(s) that already match target_ratio.
-        # uniform: one window, sized to contain the batch's largest mask, shared
-        # by every frame (stable zoom level across the clip).
+        # Step 3: empty frames. hold_last reuses the last frame that had a mask
+        # (frames before the first mask take the first one); everything still
+        # empty gets the largest target-ratio window centered in the image,
+        # which is exactly the full frame when the ratios match.
+        if empty_mask == "hold_last" and found:
+            last = found[0]
+            for i in range(B):
+                if boxes[i] is None:
+                    boxes[i] = last
+                else:
+                    last = boxes[i]
+        full_w, full_h = _fit_to_ratio(W, H, target_ratio, W, H)
+
+        # Step 4: crop window per frame as (x_center, y_center, width, height),
+        # already matching target_ratio.
+        # uniform: one window size, sized to contain the batch's largest mask,
+        # shared by every frame (stable zoom level across the clip).
         # tight: each frame gets its own window, sized to its own mask only
         # (minimal margin, but the effective zoom can vary frame to frame).
-        if crop_mode == "uniform":
+        if crop_mode == "uniform" and found:
             uniform_crop_w, uniform_crop_h = _fit_to_ratio(max_w, max_h, target_ratio, W, H)
+        windows = []
+        for b in boxes:
+            if b is None:
+                windows.append((W / 2.0, H / 2.0, full_w, full_h))
+            elif crop_mode == "uniform":
+                windows.append((b[0], b[1], uniform_crop_w, uniform_crop_h))
+            else:
+                windows.append((b[0], b[1]) + _fit_to_ratio(b[2], b[3], target_ratio, W, H))
 
-        # Step 4: final output size. The shorter side is base_resolution; the
+        # Step 4b: smoothing. Size and center are smoothed over time with no
+        # lag. The size never drops below a frame's own window; the center is
+        # smoothed inside the range that keeps that frame's padded mask (and
+        # the image edges) within the window.
+        if smoothing > 0 and B > 1:
+            smooth_w = _smooth([w[2] for w in windows], smoothing, hold_peaks=True)
+            sizes = []
+            for i in range(B):
+                crop_w = min(max(smooth_w[i], windows[i][2]), full_w)
+                crop_h = max(crop_w / target_ratio, windows[i][3])
+                sizes.append((crop_w, crop_h))
+
+            def corridor(axis, limit):
+                lows, highs = [], []
+                for b, size in zip(boxes, sizes):
+                    half = size[axis] / 2
+                    lo, hi = half, limit - half
+                    if b is not None:
+                        center, extent = b[axis], b[axis + 2]
+                        lo = max(lo, center + extent / 2 - half)
+                        hi = min(hi, center - extent / 2 + half)
+                    if lo > hi:
+                        lo = hi = (lo + hi) / 2
+                    lows.append(lo)
+                    highs.append(hi)
+                return lows, highs
+
+            smooth_x = _smooth_in_corridor([w[0] for w in windows], *corridor(0, W), smoothing)
+            smooth_y = _smooth_in_corridor([w[1] for w in windows], *corridor(1, H), smoothing)
+            smoothed = []
+            for i in range(B):
+                crop_w, crop_h = sizes[i]
+                smoothed.append((smooth_x[i], smooth_y[i], max(1, min(int(round(crop_w)), W)), max(1, min(int(round(crop_h)), H))))
+            windows = smoothed
+
+        # Step 4c: final output size. The shorter side is base_resolution; the
         # longer side follows the ratio (exact for e.g. 1080 at 16:9 ->
         # 1920x1080). Both are then snapped to the nearest multiple of
         # divisible_by (1 = no snapping).
@@ -162,15 +263,19 @@ class ImageCropByMaskToAspect:
         # Step 5: crop + resize each frame, centered on that frame's own mask.
         image_list, mask_list, bbox_list = [], [], []
         for i in range(B):
-            x_c, y_c, w_i, h_i = centers[i]
-
-            if crop_mode == "uniform":
-                crop_w, crop_h = uniform_crop_w, uniform_crop_h
-            else:
-                crop_w, crop_h = _fit_to_ratio(w_i, h_i, target_ratio, W, H)
-
-            x0 = max(0, min(int(round(x_c - crop_w / 2)), W - crop_w))
-            y0 = max(0, min(int(round(y_c - crop_h / 2)), H - crop_h))
+            x_c, y_c, crop_w, crop_h = windows[i]
+            x0 = int(round(x_c - crop_w / 2))
+            y0 = int(round(y_c - crop_h / 2))
+            b = boxes[i]
+            if b is not None:
+                # Rounding can shift a tight window by a pixel; snap it back so
+                # the padded mask (exact pixel span) is fully inside.
+                mask_x0 = int(round(b[0] - b[2] / 2 + 0.5))
+                mask_y0 = int(round(b[1] - b[3] / 2 + 0.5))
+                x0 = min(max(x0, mask_x0 + b[2] - crop_w), mask_x0)
+                y0 = min(max(y0, mask_y0 + b[3] - crop_h), mask_y0)
+            x0 = max(0, min(x0, W - crop_w))
+            y0 = max(0, min(y0, H - crop_h))
             x1, y1 = x0 + crop_w, y0 + crop_h
 
             cropped_image = image[i][y0:y1, x0:x1, :]
