@@ -129,8 +129,14 @@ class ImageReframe:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", CROP_DATA_TYPE)
-    RETURN_NAMES = ("image", "mask", "crop_data")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", CROP_DATA_TYPE)
+    RETURN_NAMES = ("original_image", "cropped_image", "mask", "crop_data")
+    OUTPUT_TOOLTIPS = (
+        "The image as loaded (or as connected to input_image), uncropped",
+        "The frame, with the padding filled with padding_color",
+        "1 in the padded area; over the image, the cropped input mask (or 0)",
+        "The frame's geometry, for Image Reframe Composite",
+    )
     FUNCTION = "reframe"
     CATEGORY = "image/transform"
     DESCRIPTION = (
@@ -215,13 +221,12 @@ class ImageReframe:
             "width": int(w),
             "height": int(h),
             "angle": float(rotation),
-            "source_image": source,
         }
 
         ui = {"reframe_source_size": [src_w, src_h]}
         if input_image is not None:
             ui["reframe_preview"] = [_save_preview(source, node_id)]
-        return {"ui": ui, "result": (out_image, out_mask, crop_data)}
+        return {"ui": ui, "result": (source, out_image, out_mask, crop_data)}
 
 
 class ImageReframeComposite:
@@ -231,7 +236,8 @@ class ImageReframeComposite:
             "required": {
                 "frame_image": ("IMAGE", {"tooltip": "An image in frame space at any resolution: the processed "
                                                      "crop, or the outpainted result"}),
-                "crop_data": (CROP_DATA_TYPE,),
+                "original_image": ("IMAGE", {"tooltip": "The original, from Image Reframe's original_image "
+                                                        "(or an edited copy of the same size)"}),
                 "paste": ([PASTE_ORIGINAL, PASTE_CROP], {
                     "default": PASTE_ORIGINAL,
                     "tooltip": f"'{PASTE_ORIGINAL}': puts the original back onto frame_image (outpainting); "
@@ -242,13 +248,16 @@ class ImageReframeComposite:
                                                "pasting the crop, inside the original's edges that border padding "
                                                "when pasting the original"}),
                 "resize_source": ("BOOLEAN", {"default": False,
-                                              "tooltip": "On: the pasted image is scaled to the destination's "
-                                                         "resolution. Off: the pasted image keeps its pixels and the "
-                                                         "destination is scaled to match it."}),
+                                              "tooltip": "The source is the image being pasted (the original or the "
+                                                         "crop, per paste). On: it is scaled to the other image's "
+                                                         "resolution. Off: it keeps its pixels and the other image "
+                                                         "is scaled to match."}),
             },
+            # ComfyUI lists required inputs before optional ones, so crop_data is
+            # declared optional to sit after mask; composite() requires it.
             "optional": {
-                "original": ("IMAGE", {"tooltip": "Replaces the original stored in crop_data (same size as the original)"}),
                 "mask": ("MASK", {"tooltip": "Limits the paste to this region (in frame space, any resolution)"}),
+                "crop_data": (CROP_DATA_TYPE, {"tooltip": "From Image Reframe (required)"}),
             },
         }
 
@@ -262,11 +271,12 @@ class ImageReframeComposite:
         "padding and rotation), with optional feathering."
     )
 
-    def composite(self, frame_image, crop_data, paste, feather, resize_source, original=None, mask=None):
+    def composite(self, frame_image, original_image, paste, feather, resize_source, mask=None, crop_data=None):
+        if crop_data is None:
+            raise ValueError("Connect crop_data from an Image Reframe node.")
+        original = original_image
         src_w, src_h = crop_data["source_width"], crop_data["source_height"]
-        if original is None:
-            original = crop_data["source_image"]
-        elif (original.shape[2], original.shape[1]) != (src_w, src_h):
+        if (original.shape[2], original.shape[1]) != (src_w, src_h):
             raise ValueError(
                 f"Original is {original.shape[2]}x{original.shape[1]}, but the frame was made from a "
                 f"{src_w}x{src_h} image."

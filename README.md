@@ -187,9 +187,10 @@ A new image of a different size resets the frame to the full image.
 
 | Output | Type | Notes |
 |---|---|---|
-| `image` | IMAGE | The frame at native resolution (`frame_width × frame_height`), padding filled with `padding_color` |
+| `original_image` | IMAGE | The image as loaded (or as connected to `input_image`), uncropped |
+| `cropped_image` | IMAGE | The frame at native resolution (`frame_width × frame_height`), padding filled with `padding_color` |
 | `mask` | MASK | `1` in the padded area; over the image, the cropped input `mask` (or `0`) — ready for outpainting |
-| `crop_data` | CROP_DATA | Frame + rotation + the original image, for the composite node |
+| `crop_data` | CROP_DATA | The frame's geometry (size, centre, rotation), for the composite node |
 
 With rotation at `0` and whole-pixel frame edges, the image part is an exact pixel copy
 (no resampling). Animated files load all frames as a batch, like Load Image; the
@@ -200,12 +201,12 @@ image's alpha channel is ignored.
 | Input | Type | Notes |
 |---|---|---|
 | `frame_image` | IMAGE | An image in frame space, any resolution: the processed crop or the outpainted result |
-| `crop_data` | CROP_DATA | From the Image Reframe node |
+| `original_image` | IMAGE | From Image Reframe's `original_image` (or an edited copy of the same size) |
+| `mask` | MASK | Optional — paste only this region (frame space, any resolution) |
+| `crop_data` | CROP_DATA | From the Image Reframe node (required; listed after `mask` so the sockets read images, mask, data) |
 | `paste` | COMBO | `original onto frame` or `crop onto original` (see below) |
 | `feather` | INT | Soft edge width, in output pixels |
 | `resize_source` | BOOLEAN | See below |
-| `original` | IMAGE | Optional — replaces the original stored in `crop_data` (same size) |
-| `mask` | MASK | Optional — paste only this region (frame space, any resolution) |
 
 `paste`:
 
@@ -217,8 +218,8 @@ image's alpha channel is ignored.
   rotation. Output is in original space; only the frame area is touched, everything
   else is left bit-identical. Feathering runs inside the frame border.
 
-`resize_source` (as in the native Image Composite Masked, the pasted image is the
-source):
+`resize_source` (as in the native Image Composite Masked, the source is the image being
+pasted: the original in `original onto frame`, `frame_image` in `crop onto original`):
 
 - **off** (default): the pasted image keeps its pixels and the destination is scaled to
   match. Pasting the original gives an output at the frame's size; pasting a crop
