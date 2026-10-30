@@ -1,9 +1,14 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const NODE_CLASS = "CropRotate";
+const NODE_CLASS = "ImageReframe";
 const ASPECT_RATIOS = { "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16, "21:9": 21 / 9 };
-const FRAME_WIDGETS = ["center_x", "center_y", "crop_width", "crop_height", "rotation"];
+const FRAME_WIDGETS = ["center_x", "center_y", "frame_width", "frame_height", "rotation"];
+const PADDING_COLORS = { grey: "#808080", black: "#000000", white: "#ffffff", green: "#00ff00" };
+// How far the frame may reach past the image on each side, and the empty margin
+// kept around the image in the viewport, as fractions of the image's longer side.
+const MAX_PADDING = 1;
+const VIEW_MARGIN = 0.15;
 const HANDLE_HIT_PX = 10;
 const HANDLE_DRAW_PX = 4;
 const MIN_FRAME_PX = 8;
@@ -17,15 +22,29 @@ const CURSORS = {
 const widget = (node, name) => node.widgets?.find((w) => w.name === name);
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
-// Geometry matches nodes.py: the frame (cx, cy, w, h) lives in source pixels and the
-// image is rotated by `rotation` degrees (clockwise, y-down) behind the upright frame.
+// "sub/name.png [output]" -> /view params, as the native Load Image preview does.
+function viewParams(value) {
+    let name = value, type = "input";
+    const m = /^(.*) \[(input|output|temp)\]$/.exec(value);
+    if (m) [, name, type] = m;
+    const slash = name.lastIndexOf("/");
+    return new URLSearchParams({
+        filename: name.slice(slash + 1),
+        subfolder: slash >= 0 ? name.slice(0, slash) : "",
+        type,
+    });
+}
+
+// Geometry matches image_reframe.py: the frame (cx, cy, w, h) lives in source pixels and
+// the image is rotated by `rotation` degrees (clockwise, y-down) behind the upright frame.
 // The editor draws in "display space": the source rotated about the image centre, where
 // the frame is axis-aligned and can be dragged with plain rectangle logic.
-class CropRotateEditor {
+class ImageReframeEditor {
     constructor(node) {
         this.node = node;
         this.image = null;
         this.sourceSize = null;
+        this.loadedKey = null;
         this.drag = null;
         this.frozenView = null;
         this.notice = "";
@@ -54,7 +73,13 @@ class CropRotateEditor {
     }
 
     ready() {
-        return !!(this.image && this.sourceSize && widget(this.node, "crop_width"));
+        return !!(this.image && this.sourceSize && widget(this.node, "frame_width"));
+    }
+
+    // With input_image connected the backend sends the preview after a run;
+    // otherwise the editor loads the chosen file itself.
+    inputLinked() {
+        return this.node.inputs?.find((i) => i.name === "input_image")?.link != null;
     }
 
     get angleRad() {
@@ -63,8 +88,8 @@ class CropRotateEditor {
 
     frameSource() {
         const [W, H] = this.sourceSize;
-        const w = widget(this.node, "crop_width").value;
-        const h = widget(this.node, "crop_height").value;
+        const w = widget(this.node, "frame_width").value;
+        const h = widget(this.node, "frame_height").value;
         if (!w || !h) return { cx: W / 2, cy: H / 2, w: W, h: H };
         return { cx: widget(this.node, "center_x").value, cy: widget(this.node, "center_y").value, w, h };
     }
@@ -81,13 +106,19 @@ class CropRotateEditor {
         return [W / 2 + Math.cos(a) * dx + Math.sin(a) * dy, H / 2 - Math.sin(a) * dx + Math.cos(a) * dy];
     }
 
-    // Bounding box of the rotated image in display space: the frame is dragged within it,
-    // so it can reach into the empty corners (filled black by the backend).
-    imageBounds() {
+    // Bounding box of the rotated image in display space.
+    rotatedImageBounds() {
         const [W, H] = this.sourceSize;
         const c = Math.abs(Math.cos(this.angleRad)), s = Math.abs(Math.sin(this.angleRad));
         const bw = W * c + H * s, bh = W * s + H * c;
         return { x0: W / 2 - bw / 2, y0: H / 2 - bh / 2, x1: W / 2 + bw / 2, y1: H / 2 + bh / 2 };
+    }
+
+    // Drag limit: the rotated image plus MAX_PADDING on every side (the padding).
+    dragBounds() {
+        const b = this.rotatedImageBounds();
+        const pad = Math.max(...this.sourceSize) * MAX_PADDING;
+        return { x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad };
     }
 
     frameDisplay() {
@@ -99,10 +130,11 @@ class CropRotateEditor {
     // Frozen during a drag so the view doesn't rescale under the pointer.
     viewBounds() {
         if (this.frozenView) return this.frozenView;
-        const b = this.imageBounds(), f = this.frameDisplay();
+        const b = this.rotatedImageBounds(), f = this.frameDisplay();
+        const m = Math.max(...this.sourceSize) * VIEW_MARGIN;
         return {
-            x0: Math.min(b.x0, f.x0), y0: Math.min(b.y0, f.y0),
-            x1: Math.max(b.x1, f.x1), y1: Math.max(b.y1, f.y1),
+            x0: Math.min(b.x0 - m, f.x0), y0: Math.min(b.y0 - m, f.y0),
+            x1: Math.max(b.x1 + m, f.x1), y1: Math.max(b.y1 + m, f.y1),
         };
     }
 
@@ -127,8 +159,8 @@ class CropRotateEditor {
         const [cx, cy] = this.displayToSource((x0 + x1) / 2, (y0 + y1) / 2);
         this.setWidget("center_x", Math.round(cx * 100) / 100);
         this.setWidget("center_y", Math.round(cy * 100) / 100);
-        this.setWidget("crop_width", Math.max(1, x1 - x0));
-        this.setWidget("crop_height", Math.max(1, y1 - y0));
+        this.setWidget("frame_width", Math.max(1, x1 - x0));
+        this.setWidget("frame_height", Math.max(1, y1 - y0));
         this.node.setDirtyCanvas(true, true);
     }
 
@@ -137,16 +169,16 @@ class CropRotateEditor {
         const [W, H] = this.sourceSize;
         this.setWidget("center_x", W / 2);
         this.setWidget("center_y", H / 2);
-        this.setWidget("crop_width", W);
-        this.setWidget("crop_height", H);
+        this.setWidget("frame_width", W);
+        this.setWidget("frame_height", H);
         this.node.setDirtyCanvas(true, true);
     }
 
     resetAll() {
         this.setWidget("center_x", 0);
         this.setWidget("center_y", 0);
-        this.setWidget("crop_width", 0);
-        this.setWidget("crop_height", 0);
+        this.setWidget("frame_width", 0);
+        this.setWidget("frame_height", 0);
         this.setWidget("rotation", 0);
         this.setWidget("aspect_ratio", "free");
         this.notice = "";
@@ -156,7 +188,7 @@ class CropRotateEditor {
     applyAspect() {
         const ratio = ASPECT_RATIOS[widget(this.node, "aspect_ratio")?.value];
         if (!ratio || !this.ready()) return;
-        const f = this.frameDisplay(), b = this.imageBounds();
+        const f = this.frameDisplay(), b = this.dragBounds();
         let w = Math.sqrt((f.x1 - f.x0) * (f.y1 - f.y0) * ratio), h = w / ratio;
         const s = Math.min(1, (b.x1 - b.x0) / w, (b.y1 - b.y0) / h);
         w *= s;
@@ -194,7 +226,7 @@ class CropRotateEditor {
     }
 
     computeRect(drag, p) {
-        const b = this.imageBounds();
+        const b = this.dragBounds();
         const ratio = ASPECT_RATIOS[widget(this.node, "aspect_ratio")?.value];
         const r = drag.rect;
         const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
@@ -325,22 +357,26 @@ class CropRotateEditor {
             ctx.fillStyle = "#888";
             ctx.font = "12px sans-serif";
             ctx.textAlign = "center";
-            ctx.fillText("Run the workflow once to load the preview", cw / 2, ch / 2);
+            const text = this.inputLinked() ? "Run the workflow once to load the preview" : "Choose or upload an image";
+            ctx.fillText(text, cw / 2, ch / 2);
             this.info.textContent = "";
             return;
         }
 
         const { k, ox, oy } = this.layout();
         const [W, H] = this.sourceSize;
+        const f = this.frameDisplay();
+        const X0 = f.x0 * k + ox, Y0 = f.y0 * k + oy, FW = (f.x1 - f.x0) * k, FH = (f.y1 - f.y0) * k;
+
+        ctx.fillStyle = PADDING_COLORS[widget(this.node, "padding_color")?.value] ?? PADDING_COLORS.grey;
+        ctx.fillRect(X0, Y0, FW, FH);
+
         ctx.save();
         ctx.translate((W / 2) * k + ox, (H / 2) * k + oy);
         ctx.rotate(this.angleRad);
         ctx.scale(k, k);
         ctx.drawImage(this.image, -W / 2, -H / 2, W, H);
         ctx.restore();
-
-        const f = this.frameDisplay();
-        const X0 = f.x0 * k + ox, Y0 = f.y0 * k + oy, FW = (f.x1 - f.x0) * k, FH = (f.y1 - f.y0) * k;
 
         ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
         ctx.beginPath();
@@ -373,80 +409,100 @@ class CropRotateEditor {
         const src = this.frameSource();
         const angle = widget(this.node, "rotation")?.value ?? 0;
         this.info.textContent =
-            this.notice || `crop ${src.w}×${src.h}px · ${angle.toFixed(1)}° · source ${W}×${H}`;
+            this.notice || `frame ${src.w}×${src.h}px · ${angle.toFixed(1)}° · source ${W}×${H}`;
     }
 
-    loadPreview(preview) {
-        if (!preview?.filename) return;
-        const params = new URLSearchParams({
-            filename: preview.filename,
-            type: preview.type || "temp",
-            subfolder: preview.subfolder || "",
-            t: String(Date.now()),
-        });
+    // Loads a preview image; `size` is the source size when the preview is a
+    // downscaled copy, otherwise the image's own size is used.
+    loadImage(key, params, size) {
+        if (key === this.loadedKey) return;
+        this.loadedKey = key;
+        params.set("t", String(Date.now()));
         const img = new Image();
         img.onload = () => {
+            if (this.loadedKey !== key) return;
+            const [W, H] = size ?? [img.naturalWidth, img.naturalHeight];
+            const prev = this.sourceSize;
             this.image = img;
+            this.sourceSize = [W, H];
+            this.notice = "";
+            if (prev && (prev[0] !== W || prev[1] !== H) && widget(this.node, "frame_width")?.value > 0) {
+                this.resetFrame();
+                this.notice = "New image size: frame reset to the full image.";
+            }
+            this.draw();
+        };
+        img.onerror = () => {
+            if (this.loadedKey !== key) return;
+            this.image = null;
             this.draw();
         };
         img.src = api.apiURL(`/view?${params}`);
     }
 
-    onExecuted(message) {
-        const size = message?.crop_rotate_source_size;
-        if (!size || size.length < 2) return;
-        const [W, H] = size;
-        const prev = this.sourceSize;
-        this.sourceSize = [W, H];
-        this.notice = "";
-        if (prev && (prev[0] !== W || prev[1] !== H) && widget(this.node, "crop_width")?.value > 0) {
-            this.resetFrame();
-            this.notice = "Input size changed: crop reset to full image. Run again to apply.";
+    refreshSource() {
+        if (this.inputLinked()) {
+            const preview = this.node.properties?.reframe_preview;
+            const size = this.node.properties?.reframe_source_size;
+            if (preview?.filename && size) {
+                const params = new URLSearchParams({
+                    filename: preview.filename, type: preview.type || "temp", subfolder: preview.subfolder || "",
+                });
+                this.loadImage(`run:${preview.filename}:${size}:${this.node.properties.reframe_run}`, params, size);
+            } else {
+                this.loadedKey = null;
+                this.image = null;
+                this.draw();
+            }
+            return;
         }
-        const preview = message.crop_rotate_preview?.[0];
-        this.node.properties.crop_rotate_source_size = [W, H];
-        this.node.properties.crop_rotate_preview = preview;
-        this.loadPreview(preview);
+        const value = widget(this.node, "image")?.value;
+        if (value) this.loadImage(`file:${value}`, viewParams(value));
+        else {
+            this.loadedKey = null;
+            this.image = null;
+            this.draw();
+        }
     }
 
-    restore() {
-        const size = this.node.properties?.crop_rotate_source_size;
-        if (size) this.sourceSize = size;
-        this.loadPreview(this.node.properties?.crop_rotate_preview);
+    onExecuted(message) {
+        const preview = message?.reframe_preview?.[0];
+        if (!preview) return;
+        this.node.properties.reframe_preview = preview;
+        this.node.properties.reframe_source_size = message.reframe_source_size;
+        this.node.properties.reframe_run = Date.now();
+        this.refreshSource();
     }
 }
 
 app.registerExtension({
-    name: "silverside.CropRotate",
+    name: "silverside.ImageReframe",
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE_CLASS) return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated?.apply(this, arguments);
-            const editor = new CropRotateEditor(this);
-            this.cropRotateEditor = editor;
+            const editor = new ImageReframeEditor(this);
+            this.imageReframeEditor = editor;
+            // The viewport replaces the native Load Image preview: the frontend
+            // only adds that preview while node.imgs holds images.
+            Object.defineProperty(this, "imgs", { configurable: true, get: () => undefined, set: () => {} });
 
-            for (const name of FRAME_WIDGETS) {
+            const hook = (name, after) => {
                 const w = widget(this, name);
-                if (!w) continue;
+                if (!w) return;
                 const callback = w.callback;
                 w.callback = function () {
                     const r = callback?.apply(this, arguments);
+                    after?.();
                     editor.draw();
                     return r;
                 };
-            }
-            const aspect = widget(this, "aspect_ratio");
-            if (aspect) {
-                const callback = aspect.callback;
-                aspect.callback = function () {
-                    const r = callback?.apply(this, arguments);
-                    editor.applyAspect();
-                    editor.draw();
-                    return r;
-                };
-            }
+            };
+            for (const name of [...FRAME_WIDGETS, "padding_color"]) hook(name);
+            hook("aspect_ratio", () => editor.applyAspect());
+            hook("image", () => editor.refreshSource());
 
             const reset = this.addWidget("button", "Reset", null, () => {
                 editor.resetAll();
@@ -454,25 +510,33 @@ app.registerExtension({
             }, { serialize: false });
             reset.serialize = false;
 
-            this.addDOMWidget("crop_rotate_editor", "crop_rotate_editor", editor.element, {
+            this.addDOMWidget("image_reframe_editor", "image_reframe_editor", editor.element, {
                 serialize: false,
                 hideOnZoom: false,
                 getMinHeight: () => 240,
             });
-            this.setSize([Math.max(this.size[0], 380), Math.max(this.size[1], 660)]);
+            this.setSize([Math.max(this.size[0], 380), Math.max(this.size[1], 720)]);
+            requestAnimationFrame(() => editor.refreshSource());
             return result;
         };
 
         const onExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
             onExecuted?.apply(this, arguments);
-            this.cropRotateEditor?.onExecuted(message);
+            this.imageReframeEditor?.onExecuted(message);
+        };
+
+        const onConnectionsChange = nodeType.prototype.onConnectionsChange;
+        nodeType.prototype.onConnectionsChange = function () {
+            const r = onConnectionsChange?.apply(this, arguments);
+            this.imageReframeEditor?.refreshSource();
+            return r;
         };
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
-            this.cropRotateEditor?.restore();
+            this.imageReframeEditor?.refreshSource();
             return r;
         };
     },

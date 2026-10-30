@@ -1,7 +1,7 @@
-from . import crop_rotate, nodes
+from . import image_reframe, nodes
 
-NODE_CLASS_MAPPINGS = {**nodes.NODE_CLASS_MAPPINGS, **crop_rotate.NODE_CLASS_MAPPINGS}
-NODE_DISPLAY_NAME_MAPPINGS = {**nodes.NODE_DISPLAY_NAME_MAPPINGS, **crop_rotate.NODE_DISPLAY_NAME_MAPPINGS}
+NODE_CLASS_MAPPINGS = {**nodes.NODE_CLASS_MAPPINGS, **image_reframe.NODE_CLASS_MAPPINGS}
+NODE_DISPLAY_NAME_MAPPINGS = {**nodes.NODE_DISPLAY_NAME_MAPPINGS, **image_reframe.NODE_DISPLAY_NAME_MAPPINGS}
 
 WEB_DIRECTORY = "./web"
 

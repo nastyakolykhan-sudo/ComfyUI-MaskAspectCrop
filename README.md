@@ -7,9 +7,10 @@ Crop-and-paste-back tools for images and video batches:
   masks where the mask moves/changes over time) and for a fixed set of allowed output
   aspect ratios instead of an arbitrary one. Paste back with KJNodes'
   `Image Uncrop By Mask`.
-- **Crop & Rotate** + **Crop & Rotate Composite**: interactively crop a *rotated*
-  region, process it, and paste it back exactly where it came from. See
-  [Crop & Rotate](#crop--rotate) below.
+- **Image Reframe** + **Image Reframe Composite**: a Load Image node with a viewport
+  for cropping, rotating, or padding the canvas for outpainting, plus a composite that
+  pastes a processed crop back into the original, or the original back onto an
+  outpainted result. See [Image Reframe](#image-reframe) below.
 
 ## Install
 
@@ -144,66 +145,87 @@ camera, at the cost of a little more margin around the mask.
 - "Closest" ratio (for `adaptive`) is measured on a log scale, so e.g. `2:1` and `1:2`
   are equally "far" from `1:1` — orientation doesn't bias the pick.
 
-# Crop & Rotate
+# Image Reframe
 
-Crop a **rotated** region out of an image (or a whole video batch), process it, and
-paste it back exactly where it came from. The image turns behind an upright frame
-(Lightroom-style), so what you see in the frame is exactly what comes out. Works the
-same for a single image (a batch of one).
+Load an image and reframe it in one node: crop it, turn it behind the frame, or push
+the frame past the image edges to pad the canvas for outpainting. Then paste back,
+either the processed crop into the original or the original onto the outpainted
+result, so the untouched part keeps its exact pixels. Works on a single image or a
+whole video batch.
 
-## Crop & Rotate node
+## Image Reframe node
 
-1. Connect an image (or video frame batch) and run the workflow once — this loads the
-   first frame into the node's preview.
-2. In the preview:
-   - drag inside the frame to move it, drag the edges/corners to resize,
-     drag outside the frame to draw a new one;
-   - use the **rotation** slider to turn the image behind the frame (positive =
-     clockwise). The frame stays locked to the same content while you rotate.
-   - **aspect_ratio** locks the frame's proportions while dragging (and reshapes the
-     current frame when you change it). **Reset** puts everything back to defaults: full image, 0° rotation, `free`
-     aspect.
-3. Run again to apply.
+Replaces the native **Load Image** node: pick or upload an image (or drag one onto
+the node) and it shows in the node's viewport straight away, no run needed. To take
+an image from another node instead (e.g. video frames), connect it to `input_image`;
+the viewport then shows the first frame after one run.
 
-The frame can extend past the image edges once rotated. Those areas are filled black in
-the output image and are `0` in the output mask.
+In the viewport:
+
+- drag inside the frame to move it, drag the edges/corners to resize, drag outside
+  the frame to draw a new one. The frame can go past the image on any side (up to the
+  image's longer side again in each direction); that area is the padding, shown in
+  `padding_color`;
+- **rotation** turns the image behind the upright frame (positive = clockwise);
+- **aspect_ratio** locks the frame's proportions while dragging (and reshapes the
+  current frame when you change it);
+- **Reset** restores the full image, 0° and `free`; it leaves the image and
+  `padding_color` as they are.
+
+A new image of a different size resets the frame to the full image.
 
 | Input | Type | Notes |
 |---|---|---|
-| `image` | IMAGE | Single image or batch — the whole batch uses the same frame |
-| `mask` | MASK | Optional — cropped with the exact same geometry |
+| `image` | COMBO + upload | As in Load Image (files in ComfyUI's `input` folder) |
 | `center_x`, `center_y` | FLOAT | Frame centre, in source pixels (set by dragging) |
-| `crop_width`, `crop_height` | INT | Frame size in source pixels; `0` = full image |
+| `frame_width`, `frame_height` | INT | Frame size in source pixels; `0` = full image |
 | `rotation` | FLOAT | Degrees, −180…180, positive = clockwise |
 | `aspect_ratio` | COMBO | `free`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `21:9` — editor drag constraint only |
+| `padding_color` | COMBO | `grey` (50%), `black`, `white`, `green` (#00FF00) |
+| `input_image` | IMAGE | Optional — replaces the uploaded image; a batch uses one frame for all frames |
+| `mask` | MASK | Optional — cropped with the same frame and merged into the mask output |
 
 | Output | Type | Notes |
 |---|---|---|
-| `image` | IMAGE | The straightened crop, at native resolution (`crop_width × crop_height`) |
-| `mask` | MASK | The input mask cropped the same way; without a mask input, `1` where the crop covers the source and `0` in the filled corners |
-| `crop_rotate` | CROP_ROTATE | Frame + rotation data for the composite node |
+| `image` | IMAGE | The frame at native resolution (`frame_width × frame_height`), padding filled with `padding_color` |
+| `mask` | MASK | `1` in the padded area; over the image, the cropped input `mask` (or `0`) — ready for outpainting |
+| `crop_data` | CROP_DATA | Frame + rotation + the original image, for the composite node |
 
-With rotation at `0` and the frame inside the image, the crop is an exact pixel slice
-(no resampling).
+With rotation at `0` and whole-pixel frame edges, the image part is an exact pixel copy
+(no resampling). Animated files load all frames as a batch, like Load Image; the
+image's alpha channel is ignored.
 
-## Crop & Rotate Composite node
+## Image Reframe Composite node
 
 | Input | Type | Notes |
 |---|---|---|
-| `destination` | IMAGE | The original image/batch that was cropped (must be the same size) |
-| `source` | IMAGE | The processed crop — any resolution; it's mapped onto the original frame |
-| `crop_rotate` | CROP_ROTATE | From the Crop & Rotate node |
-| `feather` | INT | Soft edge inside the frame border, in destination pixels |
-| `mask` | MASK | Optional — paste only this region (in crop space, any resolution) |
+| `frame_image` | IMAGE | An image in frame space, any resolution: the processed crop or the outpainted result |
+| `crop_data` | CROP_DATA | From the Image Reframe node |
+| `paste` | COMBO | `original onto frame` or `crop onto original` (see below) |
+| `feather` | INT | Soft edge width, in output pixels |
+| `resize_source` | BOOLEAN | See below |
+| `original` | IMAGE | Optional — replaces the original stored in `crop_data` (same size) |
+| `mask` | MASK | Optional — paste only this region (frame space, any resolution) |
 
-Only the rotated frame area of the destination is touched; everything outside it is
-left bit-identical. Single images and batches broadcast against each other (e.g. one
-processed still pasted onto every frame of a video).
+`paste`:
 
-## Crop & Rotate notes
+- **original onto frame** (default, for outpainting): puts the original back onto
+  `frame_image`, undoing crop, padding and rotation. Output is in frame space.
+  Feathering runs only along the original's edges that border padding; edges the frame
+  cuts through stay hard, since nothing was generated there.
+- **crop onto original**: puts `frame_image` back into the original, undoing the
+  rotation. Output is in original space; only the frame area is touched, everything
+  else is left bit-identical. Feathering runs inside the frame border.
 
-- The preview shows the first frame of the batch. If the input resolution changes, the
-  crop resets to the full image and asks you to run again.
-- One frame for the whole batch — there's no per-frame keyframing of the crop.
-- The composite needs the destination at the same size the crop was taken from; it
-  errors clearly otherwise rather than guessing a rescale.
+`resize_source` (as in the native Image Composite Masked, the pasted image is the
+source):
+
+- **off** (default): the pasted image keeps its pixels and the destination is scaled to
+  match. Pasting the original gives an output at the frame's size; pasting a crop
+  processed at 2× gives the original at 2×.
+- **on**: the pasted image is scaled to the destination's resolution, so the output
+  keeps the destination's size.
+
+Single images and batches broadcast against each other (e.g. one processed still
+pasted onto every frame of a video).
+
