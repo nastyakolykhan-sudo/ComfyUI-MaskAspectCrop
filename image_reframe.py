@@ -149,9 +149,12 @@ class ImageReframe:
 
     @classmethod
     def IS_CHANGED(cls, image, **kwargs):
-        if not folder_paths.exists_annotated_filepath(image):
+        # Same lookup as Load Image, so hosts that fetch inputs on demand (Comfy
+        # Cloud) see the file; a missing file only matters without input_image.
+        try:
+            return comfy_nodes.LoadImage.IS_CHANGED(image)
+        except Exception:
             return ""
-        return comfy_nodes.LoadImage.IS_CHANGED(image)
 
     @classmethod
     def VALIDATE_INPUTS(cls, image):
@@ -164,10 +167,13 @@ class ImageReframe:
         # aspect_ratio only constrains the editor's drag behaviour in the frontend.
         if input_image is not None:
             source = input_image
-        elif folder_paths.exists_annotated_filepath(image):
-            source = comfy_nodes.LoadImage().load_image(image)[0]
         else:
-            raise ValueError(f"Invalid image file: {image}")
+            # No existence check first: Load Image's own lookup is what hosts
+            # that fetch inputs on demand (Comfy Cloud) hook into.
+            try:
+                source = comfy_nodes.LoadImage().load_image(image)[0]
+            except FileNotFoundError:
+                raise ValueError(f"Invalid image file: {image}") from None
         source = source.float()
         batch, src_h, src_w, _ = source.shape
         device = source.device
