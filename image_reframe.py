@@ -123,6 +123,10 @@ class ImageReframe:
                 "input_image": ("IMAGE", {"tooltip": "Replaces the uploaded image when connected (a single "
                                                      "image or a batch; the whole batch uses the same frame)"}),
                 "mask": ("MASK", {"tooltip": "Cropped with the same frame and combined into the mask output"}),
+                # Optional so saved API prompts without it still validate.
+                "feathering": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 1,
+                                       "tooltip": "Fades the mask from the padding into the image over this many "
+                                                  "pixels, along the image edges that border padding"}),
             },
             "hidden": {
                 "node_id": "UNIQUE_ID",
@@ -134,7 +138,7 @@ class ImageReframe:
     OUTPUT_TOOLTIPS = (
         "The image as loaded (or as connected to input_image), uncropped",
         "The frame, with the padding filled with padding_color",
-        "1 in the padded area; over the image, the cropped input mask (or 0)",
+        "1 in the padded area; over the image, the cropped input mask (or 0), faded in by feathering",
         "The frame's geometry, for Image Reframe Composite",
     )
     FUNCTION = "reframe"
@@ -163,7 +167,7 @@ class ImageReframe:
         return True
 
     def reframe(self, image, center_x, center_y, frame_width, frame_height, rotation, aspect_ratio,
-                padding_color, input_image=None, mask=None, node_id=None):
+                padding_color, input_image=None, mask=None, feathering=0, node_id=None):
         # aspect_ratio only constrains the editor's drag behaviour in the frontend.
         if input_image is not None:
             source = input_image
@@ -213,11 +217,25 @@ class ImageReframe:
             if src_mask is not None:
                 crop_mask = _sample(src_mask.unsqueeze(1), grid, "bilinear", "border")[:, 0]
 
-        # 1 in the padding; over the image, the cropped input mask (or 0).
-        if src_mask is None:
+        # Over the image: the cropped input mask, raised by the feathering ramp.
+        inner = None if src_mask is None else crop_mask
+        if feathering > 0:
+            # Same falloff as Pad Image for Outpainting: ((f - d) / f)^2 from the edge
+            # pixel (0.81 at 10 px) to 0 at `feathering` px in, on edges that border padding.
+            sx, sy = _frame_to_source(cx, cy, w, h, rotation, w, h, device)
+            edges = [(sx, sx < 0), (src_w - sx, sx > src_w), (sy, sy < 0), (src_h - sy, sy > src_h)]
+            distance = torch.full_like(sx, float("inf"))
+            for dist, beyond in edges:
+                if beyond.any():
+                    distance = torch.minimum(distance, dist + 0.5)
+            ramp = ((feathering - distance) / feathering).clamp(0, 1) ** 2
+            inner = ramp if inner is None else torch.maximum(inner, ramp)
+
+        # 1 in the padding; over the image, `inner` (or 0).
+        if inner is None:
             out_mask = (1 - coverage).expand(batch, h, w).contiguous()
         else:
-            out_mask = (1 - coverage) + coverage * crop_mask
+            out_mask = ((1 - coverage) + coverage * inner).expand(batch, h, w).contiguous()
 
         crop_data = {
             "source_width": src_w,

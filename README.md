@@ -184,12 +184,13 @@ A new image of a different size resets the frame to the full image.
 | `padding_color` | COMBO | `grey` (50%), `black`, `white`, `green` (#00FF00) |
 | `input_image` | IMAGE | Optional — replaces the uploaded image; a batch uses one frame for all frames |
 | `mask` | MASK | Optional — cropped with the same frame and merged into the mask output |
+| `feathering` | INT | Default `0`. Fades the mask from the padding into the image over this many pixels, along the image edges that border padding only; same falloff as Pad Image for Outpainting's `feathering`. The image itself is not changed |
 
 | Output | Type | Notes |
 |---|---|---|
 | `original_image` | IMAGE | The image as loaded (or as connected to `input_image`), uncropped |
 | `cropped_image` | IMAGE | The frame at native resolution (`frame_width × frame_height`), padding filled with `padding_color` |
-| `mask` | MASK | `1` in the padded area; over the image, the cropped input `mask` (or `0`) — ready for outpainting |
+| `mask` | MASK | `1` in the padded area; over the image, the cropped input `mask` (or `0`), raised by the `feathering` ramp — ready for outpainting |
 | `crop_data` | CROP_DATA | The frame's geometry (size, centre, rotation), for the composite node |
 
 With rotation at `0` and whole-pixel frame edges, the image part is an exact pixel copy

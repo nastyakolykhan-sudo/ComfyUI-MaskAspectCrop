@@ -536,6 +536,14 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
+            // Workflows saved before `feathering` existed put the upload button's
+            // value in its slot; start them at 0 and give the button its value back.
+            const feathering = widget(this, "feathering");
+            if (feathering && typeof feathering.value !== "number") {
+                const upload = widget(this, "upload");
+                if (upload) upload.value = feathering.value;
+                feathering.value = 0;
+            }
             this.imageReframeEditor?.refreshSource();
             return r;
         };
