@@ -11,6 +11,8 @@ Crop-and-paste-back tools for images and video batches:
   for cropping, rotating, or padding the canvas for outpainting, plus a composite that
   pastes a processed crop back into the original, or the original back onto an
   outpainted result. See [Image Reframe](#image-reframe) below.
+- **Optional Image (Given?)**: makes an image input optional; an empty upload is
+  skipped instead of failing. See [Optional Image](#optional-image-given) below.
 
 ## Install
 
@@ -231,3 +233,16 @@ pasted: the original in `original onto frame`, `frame_image` in `crop onto origi
 Single images and batches broadcast against each other (e.g. one processed still
 pasted onto every frame of a video).
 
+
+# Optional Image (Given?)
+
+Makes an image input optional. An upload node left empty (for example an app input the user skipped) fails as soon
+as it runs; this node reads the queued prompt instead, so an empty upload is never run.
+
+- **Input:** `image` (optional, lazy), usually straight from an upload node (`WorkflowIOImageInput`, Load Image,
+  Image Reframe).
+- **Outputs:** `image` (the image, or nothing when none was given) and `given` (BOOLEAN).
+- **Use:** feed `given` to an If/Else Switch (core `ComfySwitchNode`, lazy). Put the nodes that need the image on
+  its `on_true` side and the no-image path on `on_false`: when no file was uploaded, the upload node and everything
+  that only feeds `on_true` never run, so they can't fail and cost nothing.
+- An input fed by any node other than an upload node counts as given.
